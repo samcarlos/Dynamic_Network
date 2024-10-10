@@ -2,7 +2,7 @@ import pandas as pd
 import itertools
 import numpy as np
 
-data = pd.read_csv('/users/sweiss/downloads/sipri.csv', header = None)
+data = pd.read_csv('/users/sweiss/src/Dynamic_Network/sipri.csv', header = None)
 
 # Define the helper function to process the supplier data while ensuring the index corresponds to the original row
 def process_supplier_data(df):
@@ -99,3 +99,127 @@ Country_1 = np.concatenate([Country_1, scaled_year.reshape(-1,1)], axis = 1)
 Country_2 = np.concatenate([Country_2, scaled_year.reshape(-1,1)], axis = 1)    
 
 response = np.array(df_unique_pairs['Value']).reshape(-1, 1)
+
+
+
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import numpy as np
+
+# Define the base network (equivalent to Keras's Sequential)
+class BaseNetwork(nn.Module):
+    def __init__(self, input_dim):
+        super(BaseNetwork, self).__init__()
+        self.fc1 = nn.Linear(input_dim, 128)
+        self.fc2 = nn.Linear(128, 128)
+        self.fc3 = nn.Linear(128, 128)
+        self.fc4 = nn.Linear(128, 2)
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = F.relu(self.fc2(x))
+        x = self.dropout(x)
+        x = F.relu(self.fc3(x))
+        x = self.fc4(x)
+        return x
+
+# Define the Siamese Network
+class SiameseNetwork(nn.Module):
+    def __init__(self, input_dim):
+        super(SiameseNetwork, self).__init__()
+        self.base_network = BaseNetwork(input_dim)
+
+    def forward(self, input_a, input_b):
+        # Pass through the shared base network
+        output_a = self.base_network(input_a)
+        output_b = self.base_network(input_b)
+        
+        # Compute the Euclidean distance
+        distance = F.pairwise_distance(output_a, output_b)
+        return distance
+
+# Define the contrastive loss function
+class ContrastiveLoss(nn.Module):
+    def __init__(self, margin=1.0):
+        super(ContrastiveLoss, self).__init__()
+        self.margin = margin
+
+    def forward(self, output, label):
+        # Compute the contrastive loss as per Hadsell et al.
+        euclidean_distance = output
+        loss_contrastive = torch.mean(
+            label * torch.pow(euclidean_distance, 2) + 
+            (1 - label) * torch.pow(torch.clamp(self.margin - euclidean_distance, min=0.0), 2)
+        )
+        return loss_contrastive
+
+# Initialize the Siamese network and the loss function
+input_dim = Country_1.shape[1]  # Your input dimension
+model = SiameseNetwork(input_dim)
+criterion = ContrastiveLoss()
+
+# Optimizer
+optimizer = optim.RMSprop(model.parameters(), lr=1e-3)
+
+# Example training loop
+def train(model, criterion, optimizer, Country_1, Country_2, response, num_epochs=25, batch_size=10240):
+    model.train()
+    dataset = torch.utils.data.TensorDataset(torch.tensor(Country_1), torch.tensor(Country_2), torch.tensor(response))
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    
+    for epoch in range(num_epochs):
+        running_loss = 0.0
+        for i, data in enumerate(dataloader):
+            input_a, input_b, label = data
+            
+            # Zero the gradients
+            optimizer.zero_grad()
+
+            # Forward pass
+            output = model(input_a.float(), input_b.float())
+
+            # Compute the loss
+            loss = criterion(output, label.float())
+
+            # Backward pass and optimization
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+
+        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {running_loss/len(dataloader)}")
+
+train(model, criterion, optimizer, Country_1, Country_2, response, num_epochs=25, batch_size=10240)
+
+def get_embeddings(model, x_train):
+    model.eval()
+    with torch.no_grad():
+        embeddings = model.base_network(torch.tensor(x_train).float())
+    return embeddings.numpy()
+
+# Get the embeddings for the training data
+embeddings_1 = get_embeddings(model, Country_1)
+embeddings_2 = get_embeddings(model, Country_2)
+
+embeddings_1 = pd.DataFrame(embeddings_1)
+embeddings_2 = pd.DataFrame(embeddings_2)
+
+embeddings_1.columns = ['embedding_' + str(x) for x in range(embeddings_1.shape[1])]
+embeddings_2.columns = ['embedding_' + str(x) for x in range(embeddings_2.shape[1])]
+
+embeddings_1['Year'] = df_unique_pairs['Year']
+embeddings_2['Year'] = df_unique_pairs['Year']
+
+embeddings_1['Country'] = df_unique_pairs['Country1']
+embeddings_2['Country'] = df_unique_pairs['Country2']
+
+embeddings_1['Value'] = df_unique_pairs['Value']
+embeddings_2['Value'] = df_unique_pairs['Value']
+
+
+embeddings_df = pd.concat([embeddings_1, embeddings_2], ignore_index=True)
